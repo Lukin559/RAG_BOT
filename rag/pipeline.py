@@ -1,3 +1,4 @@
+# rag/pipeline.py
 from langchain.chains import ConversationalRetrievalChain
 from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
@@ -7,7 +8,7 @@ from .vectorestore import create_or_load_vectorstore
 
 def get_rag_chain():
     """Создаём цепочку RAG на базе ConversationalRetrievalChain."""
-    vectorstore = create_or_load_vectorstore()
+    vectorstore = create_or_load_vectorstore(use_db=True)
     retriever = vectorstore.as_retriever(search_kwargs={"k": 2})
 
     llm = ChatOpenAI(
