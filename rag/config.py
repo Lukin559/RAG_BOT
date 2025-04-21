@@ -11,4 +11,4 @@ DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "info.txt")
 
 # Общие настройки для LLM (параметры ChatGPT)
 LLM_MODEL_NAME = "gpt-4o-mini"
-TEMPERATURE = 0.0
+TEMPERATURE = 1.0

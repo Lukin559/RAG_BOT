@@ -1,79 +1,71 @@
 # rag/vectorestore.py
-import os
+from __future__ import annotations
+
+import shutil
+import sqlite3
+import tempfile
+from pathlib import Path
+from typing import List
+
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
-from .config import DATA_PATH, OPENAI_API_KEY
 from langchain.docstore.document import Document
-import sqlite3
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
-# Функция, читающая документы из текстового файла (уже реализована)
-def load_documents_from_txt(file_path: str) -> list:
-    with open(file_path, "r", encoding="utf-8") as f:
-        text = f.read()
+from .config import OPENAI_API_KEY
 
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000, 
-        chunk_overlap=100, 
-        separators=["\n\n", "\n", ".", "!", "?"]
-    )
-    
-    chunks = text_splitter.split_text(text)
-    docs = [Document(page_content=chunk) for chunk in chunks]
-    return docs
+DB_PATH = Path("data.db")
+BASE_DIR = Path("vectorstore")          # «актуальный» индекс живёт здесь
 
-def load_documents_from_db(db_path: str = "data.db") -> list:
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    c.execute("SELECT id, source, title, content, created_at FROM site_data")
-    rows = c.fetchall()
+
+def _load_docs() -> List[Document]:
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT source, content FROM site_data").fetchall()
     conn.close()
 
-    docs = []
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", ".", "!", "?"]
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1_000, chunk_overlap=100,
+        separators=["\n\n", "\n", ".", "!", "?"],
     )
-    
-    for row in rows:
-        content = row[3]
-        chunks = text_splitter.split_text(content)
-        docs.extend([Document(page_content=chunk) for chunk in chunks])
-    
+    docs = []
+    for source, content in rows:
+        for chunk in splitter.split_text(content):
+            docs.append(Document(page_content=chunk, metadata={"source": source}))
     return docs
 
-def create_or_load_vectorstore(persist_directory: str = "vectorstore", use_db: bool = False) -> Chroma:
-    """
-    Создает или подгружает существующее векторное хранилище (Chroma).
-    Если хранилище отсутствует, создает его на основе документов,
-    загруженных либо из текстового файла, либо из базы данных.
-    """
-    from langchain_openai import OpenAIEmbeddings
+
+def _build_index(dir_: Path) -> Chroma:
+    docs = _load_docs()
+    print(f"📄  Строим индекс в {dir_}. Документов: {len(docs)}")
+
     embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+    return Chroma.from_documents(
+        documents=docs,
+        embedding=embeddings,
+        collection_name="rag_collection",
+        persist_directory=str(dir_),
+    )
 
-    if not os.path.exists(persist_directory):
-        os.makedirs(persist_directory)
 
-    # Если в хранилище уже есть файлы, подгружаем существующее хранилище.
-    if len(os.listdir(persist_directory)) > 0:
-        vectorstore = Chroma(
-            collection_name="my_collection",
-            persist_directory=persist_directory,
-            embedding_function=embeddings
-        )
-    else:
-        # Выбираем источник документов.
-        if use_db:
-            docs = load_documents_from_db()
-        else:
-            docs = load_documents_from_txt(DATA_PATH)
-        vectorstore = Chroma.from_documents(
-            documents=docs,
-            embedding=embeddings,
-            collection_name="my_collection",
-            persist_directory=persist_directory
-        )
-    
-    return vectorstore
+def create_fresh_vectorstore() -> Chroma:
+    """
+    1. Создаёт индекс в уникальном временном каталоге.
+    2. Удаляет старый BASE_DIR (если был) и «переименовывает» новый.
+    3. Возвращает готовый объект Chroma, уже читающий из BASE_DIR.
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="vs_tmp_"))
+    vs_tmp = _build_index(tmp_dir)      # строим «песочницу»
+
+    # ——> атомарная подмена каталога
+    if BASE_DIR.exists():
+        shutil.rmtree(BASE_DIR)
+    tmp_dir.rename(BASE_DIR)
+
+    # подключаемся к «новому официальному» каталогу
+    print("✅  Индекс пересобран")
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+    return Chroma(
+        collection_name="rag_collection",
+        persist_directory=str(BASE_DIR),
+        embedding_function=embeddings,
+    )
